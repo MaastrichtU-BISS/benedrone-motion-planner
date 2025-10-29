@@ -90,11 +90,31 @@ func calculateBoundingBox(polygon Polygon) (rtreego.Rect, error) {
 }
 
 // GetRouteBoundingBox calculates the bounding box for a route with margin
+// Uses default expansion factor of 1.0 (no expansion)
 func GetRouteBoundingBox(start, end Point, margin float64) (minX, minY, maxX, maxY float64) {
-	minX = min(start.X, end.X) - margin
-	maxX = max(start.X, end.X) + margin
-	minY = min(start.Y, end.Y) - margin
-	maxY = max(start.Y, end.Y) + margin
+	return GetRouteBoundingBoxWithFactor(start, end, margin, 1.0)
+}
+
+// GetRouteBoundingBoxWithFactor calculates the bounding box with a custom expansion factor
+func GetRouteBoundingBoxWithFactor(start, end Point, margin float64, expansionFactor float64) (minX, minY, maxX, maxY float64) {
+	baseMinX := min(start.X, end.X)
+	baseMaxX := max(start.X, end.X)
+	baseMinY := min(start.Y, end.Y)
+	baseMaxY := max(start.Y, end.Y)
+
+	// Calculate the route dimensions
+	width := baseMaxX - baseMinX
+	height := baseMaxY - baseMinY
+
+	// Combine both additive margin and multiplicative expansion
+	extraX := max(margin, width*expansionFactor*0.5)
+	extraY := max(margin, height*expansionFactor*0.5)
+
+	minX = baseMinX - extraX
+	maxX = baseMaxX + extraX
+	minY = baseMinY - extraY
+	maxY = baseMaxY + extraY
+
 	return
 }
 

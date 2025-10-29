@@ -70,9 +70,12 @@ func AStarPathOnGraph(graph *Graph, startIdx, endIdx int) ([]Point, bool) {
 	openSetMap := make(map[int]*Node)
 	openSetMap[startIdx] = startNode
 
+	nodesExplored := 0
+
 	for openSet.Len() > 0 {
 		current := heap.Pop(openSet).(*Node)
 		delete(openSetMap, current.NodeID)
+		nodesExplored++
 
 		// Check if we reached the goal
 		if current.NodeID == endIdx {

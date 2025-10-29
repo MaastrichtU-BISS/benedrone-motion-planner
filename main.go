@@ -13,11 +13,25 @@ type Point struct {
 	Y float64 `json:"y"`
 }
 
+type BoundingBox struct {
+	MinX float64 `json:"minX"`
+	MinY float64 `json:"minY"`
+	MaxX float64 `json:"maxX"`
+	MaxY float64 `json:"maxY"`
+}
+
 type RouteRequest struct {
 	Start Point `json:"start"`
 	End   Point `json:"end"`
 	// Optional: margin in map units to query around the route (default: 1000)
 	Margin float64 `json:"margin,omitempty"`
+	// Optional: expansion factor for bounding box (default: 1.0, no expansion)
+	ExpansionFactor float64 `json:"expansionFactor,omitempty"`
+	// Optional: custom bounding box (if provided, overrides margin and expansionFactor)
+	CustomBBox *BoundingBox `json:"customBBox,omitempty"`
+	// Optional: client-provided simplification epsilon (Douglas-Peucker)
+	// If provided and > 0, this epsilon will be used instead of automatic estimation.
+	SimplificationEpsilon *float64 `json:"simplificationEpsilon,omitempty"`
 }
 
 type CreateIndexRequest struct {
@@ -33,6 +47,7 @@ type RouteResponse struct {
 	SimplifiedPolygons  []Polygon `json:"simplifiedPolygons,omitempty"`
 	VerticesBeforeSimpl int       `json:"verticesBeforeSimplification,omitempty"`
 	VerticesAfterSimpl  int       `json:"verticesAfterSimplification,omitempty"`
+	DistanceMeters      float64   `json:"distanceMeters,omitempty"`
 }
 
 var (
@@ -77,13 +92,6 @@ func routeHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("   Start: (%.2f, %.2f)\n", req.Start.X, req.Start.Y)
 	log.Printf("   End:   (%.2f, %.2f)\n", req.End.X, req.End.Y)
 
-	// Default margin if not specified (e.g., 1000 meters or map units)
-	margin := req.Margin
-	if margin == 0 {
-		margin = 1000.0
-	}
-	log.Printf("   Margin: %.2f\n", margin)
-
 	var noFlyZones []Polygon
 
 	// Use spatial index to query relevant polygons
@@ -93,9 +101,39 @@ func routeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var minX, minY, maxX, maxY float64
+
+	// Check if custom bounding box is provided
+	if req.CustomBBox != nil {
+		// Use custom bounding box from user (e.g., drawn rectangle in OpenLayers)
+		minX = req.CustomBBox.MinX
+		minY = req.CustomBBox.MinY
+		maxX = req.CustomBBox.MaxX
+		maxY = req.CustomBBox.MaxY
+		log.Printf("   Using custom bounding box\n")
+	} else {
+		// Calculate bounding box from start/end with margin and expansion factor
+		margin := req.Margin
+		if margin == 0 {
+			margin = 1000.0
+		}
+		log.Printf("   Margin: %.2f\n", margin)
+
+		expansionFactor := req.ExpansionFactor
+		if expansionFactor == 0 {
+			expansionFactor = 1.0 // No expansion by default
+		}
+		log.Printf("   Expansion factor: %.2fx\n", expansionFactor)
+
+		minX, minY, maxX, maxY = GetRouteBoundingBoxWithFactor(req.Start, req.End, margin, expansionFactor)
+	}
+
+	bboxWidth := maxX - minX
+	bboxHeight := maxY - minY
+	log.Printf("   Query bbox: (%.2f, %.2f) to (%.2f, %.2f) [%.2f x %.2f]\n",
+		minX, minY, maxX, maxY, bboxWidth, bboxHeight)
+
 	indexMutex.RLock()
-	minX, minY, maxX, maxY := GetRouteBoundingBox(req.Start, req.End, margin)
-	log.Printf("   Query bbox: (%.2f, %.2f) to (%.2f, %.2f)\n", minX, minY, maxX, maxY)
 	noFlyZones = globalIndex.QueryRegion(minX, minY, maxX, maxY)
 	indexMutex.RUnlock()
 
@@ -113,30 +151,43 @@ func routeHandler(w http.ResponseWriter, r *http.Request) {
 	verticesAfterSimplification := 0
 	var simplifiedPolygons []Polygon
 
-	// Simplify polygons if too many vertices
-	if totalVertices > 1000 {
-		verticesBeforeSimplification = totalVertices
-		epsilon := EstimateSimplificationEpsilon(noFlyZones, totalVertices)
-		log.Printf("⚙️  Simplifying polygons (epsilon: %.6f)...\n", epsilon)
+	log.Printf("⚙️  Simplifying polygons...\n")
 
+	// Choose epsilon: prefer client-provided value if present, otherwise estimate
+	var epsilon float64
+	if req.SimplificationEpsilon != nil && *req.SimplificationEpsilon > 0 {
+		epsilon = *req.SimplificationEpsilon * 0.00002
+		log.Printf("   Using client-provided simplification epsilon: %.8f\n", epsilon)
+	}
+	// else {
+	// 	epsilon = EstimateSimplificationEpsilon(noFlyZones, totalVertices)
+	// 	log.Printf("   Using estimated simplification epsilon: %.8f\n", epsilon)
+	// }
+
+	if epsilon > 0 {
 		noFlyZones = SimplifyPolygons(noFlyZones, epsilon)
-		simplifiedPolygons = noFlyZones // Store simplified polygons for response
-
-		// Count after simplification
-		simplifiedVertices := 0
-		for _, poly := range noFlyZones {
-			simplifiedVertices += len(poly.Vertices)
-		}
-		verticesAfterSimplification = simplifiedVertices
-		log.Printf("   Vertices after simplification: %d (%.1f%% reduction)\n",
-			simplifiedVertices,
-			100.0*float64(totalVertices-simplifiedVertices)/float64(totalVertices))
-		totalVertices = simplifiedVertices
+		simplifiedPolygons = noFlyZones
 	}
 
+	// Count after simplification
+	simplifiedVertices := 0
+	for _, poly := range noFlyZones {
+		simplifiedVertices += len(poly.Vertices)
+	}
+	verticesBeforeSimplification = totalVertices
+	verticesAfterSimplification = simplifiedVertices
+
+	reductionPct := 0.0
+	if verticesBeforeSimplification > 0 {
+		reductionPct = 100.0 * float64(verticesBeforeSimplification-verticesAfterSimplification) / float64(verticesBeforeSimplification)
+	}
+	log.Printf("   Vertices: %d → %d (%.1f%% reduction)\n", verticesBeforeSimplification, verticesAfterSimplification, reductionPct)
+
+	totalVertices = simplifiedVertices
+
 	// Final check on vertex count
-	if totalVertices > 5000 {
-		errorMsg := fmt.Sprintf("Too many vertices (%d) even after simplification. Reduce margin or simplify polygons on client side.", totalVertices)
+	if totalVertices > 10000 {
+		errorMsg := fmt.Sprintf("Too many vertices (%d) even after simplification. Try reducing margin.", totalVertices)
 		log.Printf("❌ %s\n", errorMsg)
 		http.Error(w, errorMsg, http.StatusBadRequest)
 		log.Println("========================================")
@@ -147,25 +198,30 @@ func routeHandler(w http.ResponseWriter, r *http.Request) {
 	log.Println("🔗 Building visibility graph...")
 	graph := BuildVisibilityGraph(req.Start, req.End, noFlyZones)
 	log.Printf("   Graph nodes: %d\n", len(graph.Nodes))
+
 	edgeCount := 0
 	for _, edges := range graph.Edges {
 		edgeCount += len(edges)
 	}
 	log.Printf("   Graph edges: %d\n", edgeCount/2) // Divided by 2 because edges are bidirectional
 
-	if len(graph.Nodes) > 500 {
-		log.Printf("💡 TIP: Consider simplifying your polygons to reduce vertices\n")
-		log.Printf("   See POLYGON_SIMPLIFICATION.md for guidance\n")
-	}
-
 	// Compute A* path on the visibility graph
 	// Start is always node 0, end is always node 1 (see BuildVisibilityGraph)
 	log.Println("🔍 Running A* pathfinding...")
 	path, success := AStarPathOnGraph(graph, 0, 1)
 
+	// Calculate path distance in meters
+	var distanceMeters float64
+	if success && len(path) > 1 {
+		for i := 0; i < len(path)-1; i++ {
+			distanceMeters += path[i].DistanceMeters(path[i+1])
+		}
+	}
+
 	response := RouteResponse{
 		Path:                path,
 		Success:             success,
+		DistanceMeters:      distanceMeters,
 		PolygonsQueried:     len(noFlyZones),
 		SimplifiedPolygons:  simplifiedPolygons,
 		VerticesBeforeSimpl: verticesBeforeSimplification,
@@ -177,9 +233,10 @@ func routeHandler(w http.ResponseWriter, r *http.Request) {
 		response.Message = "No path found"
 	} else {
 		log.Printf("✅ Path found with %d waypoints\n", len(path))
+		log.Printf("   Distance: %.2f meters\n", distanceMeters)
 		log.Println("   Waypoints:")
 		for i, p := range path {
-			log.Printf("      %d: (%.2f, %.2f)\n", i, p.X, p.Y)
+			log.Printf("      %d: (%.6f, %.6f)\n", i, p.X, p.Y)
 		}
 	}
 
@@ -215,7 +272,7 @@ func createSpatialIndexHandler(w http.ResponseWriter, r *http.Request) {
 		log.Println("⚠️  Spatial index already exists")
 		log.Println("   To reload, set force:true in request or restart the server")
 		log.Println("========================================")
-		
+
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusConflict)
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -239,20 +296,6 @@ func createSpatialIndexHandler(w http.ResponseWriter, r *http.Request) {
 		totalVertices += len(poly.Vertices)
 	}
 	log.Printf("   Total vertices: %d\n", totalVertices)
-
-	// Merge overlapping/contained polygons to reduce complexity
-	if len(polygons) > 1 {
-		log.Println("🔀 Merging overlapping polygons...")
-		polygons = MergeOverlappingPolygons(polygons)
-		log.Printf("   Polygons after merge: %d\n", len(polygons))
-
-		// Count vertices after merging
-		mergedVertices := 0
-		for _, poly := range polygons {
-			mergedVertices += len(poly.Vertices)
-		}
-		log.Printf("   Vertices after merge: %d\n", mergedVertices)
-	}
 
 	log.Println("🔨 Building spatial index...")
 	indexMutex.Lock()

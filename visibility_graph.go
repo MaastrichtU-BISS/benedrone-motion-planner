@@ -49,10 +49,17 @@ func BuildVisibilityGraph(start, end Point, noFlyZones []Polygon) *Graph {
 	for _, zone := range noFlyZones {
 		for _, vertex := range zone.Vertices {
 			// Skip if vertex is already added (e.g., shared vertices)
-			if _, exists := vertexToIdx[vertex]; !exists {
+			if existingIdx, exists := vertexToIdx[vertex]; !exists {
 				graph.Nodes[nodeIndex] = vertex
 				vertexToIdx[vertex] = nodeIndex
 				nodeIndex++
+			} else {
+				// Vertex already exists - check if it's the start or end point
+				if existingIdx == endIdx {
+					log.Printf("⚠️  WARNING: Polygon vertex coincides with end point at (%.6f, %.6f)\n", vertex.X, vertex.Y)
+				} else if existingIdx == startIdx {
+					log.Printf("⚠️  WARNING: Polygon vertex coincides with start point at (%.6f, %.6f)\n", vertex.X, vertex.Y)
+				}
 			}
 		}
 	}
@@ -62,13 +69,9 @@ func BuildVisibilityGraph(start, end Point, noFlyZones []Polygon) *Graph {
 	log.Printf("   Unique nodes: %d\n", totalNodes)
 	log.Printf("   Checking up to %d possible edges...\n", totalPossibleEdges)
 
-	// Safety limit: prevent massive graphs
-	if totalNodes > 1000 {
-		log.Printf("❌ ERROR: Too many nodes (%d). Reduce margin or simplify polygons.\n", totalNodes)
-		// Return minimal graph with just start and end
-		graph.Edges[startIdx] = append(graph.Edges[startIdx], Edge{To: endIdx, Cost: start.Distance(end)})
-		graph.Edges[endIdx] = append(graph.Edges[endIdx], Edge{To: startIdx, Cost: start.Distance(end)})
-		return graph
+	// Warn about large graphs but continue processing
+	if totalNodes > 2000 {
+		log.Printf("⚠️  WARNING: Large graph with %d nodes. Processing may take time...\n", totalNodes)
 	}
 
 	if totalPossibleEdges > 100000 {

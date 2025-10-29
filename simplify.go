@@ -5,13 +5,37 @@ import (
 )
 
 // SimplifyPolygon reduces polygon complexity using Douglas-Peucker algorithm
-// epsilon is the tolerance - larger values = more simplification
+// For closed polygons, uses topology-preserving approach to avoid expansion
 func SimplifyPolygon(polygon Polygon, epsilon float64) Polygon {
 	if len(polygon.Vertices) <= 3 {
-		return polygon // Already minimal
+		return polygon
 	}
 
-	simplified := douglasPeucker(polygon.Vertices, epsilon)
+	n := len(polygon.Vertices)
+	first := polygon.Vertices[0]
+	last := polygon.Vertices[n-1]
+	const closeThreshold = 1e-9
+	isClosed := (math.Abs(first.X-last.X) < closeThreshold && math.Abs(first.Y-last.Y) < closeThreshold)
+
+	var simplified []Point
+	if isClosed {
+		// Remove duplicate closing point, simplify, then re-close
+		openPolygon := polygon.Vertices[:n-1]
+		simplified = douglasPeucker(append(openPolygon, openPolygon[0]), epsilon)
+
+		// Remove the duplicate we added and re-close properly
+		if len(simplified) > 1 {
+			simplified = simplified[:len(simplified)-1]
+			if len(simplified) >= 3 {
+				simplified = append(simplified, simplified[0])
+			} else {
+				return polygon // Failed to simplify adequately
+			}
+		}
+	} else {
+		simplified = douglasPeucker(polygon.Vertices, epsilon)
+	}
+
 	return Polygon{Vertices: simplified}
 }
 
@@ -86,45 +110,47 @@ func perpendicularDistance(point, lineStart, lineEnd Point) float64 {
 }
 
 // EstimateSimplificationEpsilon suggests epsilon based on coordinate system and vertex count
+// Uses conservative values to preserve polygon topology
 func EstimateSimplificationEpsilon(polygons []Polygon, currentVertexCount int) float64 {
 	if len(polygons) == 0 {
-		return 0.0001 // Default for lat/lng
+		return 0.0001
 	}
 
-	// Sample some points to detect coordinate system
 	samplePoint := polygons[0].Vertices[0]
 
-	// Check if lat/lng (values between -180 and 180)
+	// Check if lat/lng coordinates
 	if samplePoint.X >= -180 && samplePoint.X <= 180 &&
 		samplePoint.Y >= -90 && samplePoint.Y <= 90 {
-		// Lat/lng coordinates: use adaptive epsilon based on vertex count
-		// Base epsilon: 0.0001 degrees ≈ 11 meters
-		// Target: reduce to max 400-500 vertices for reasonable performance
-		baseEpsilon := 0.0001
+		// Base: 0.00002 degrees ≈ 2.2 meters
+		baseEpsilon := 0.00002
 
-		if currentVertexCount > 30000 {
-			return baseEpsilon * 20.0 // 0.002 degrees ≈ 220 meters
+		if currentVertexCount > 50000 {
+			return baseEpsilon * 10.0
+		} else if currentVertexCount > 30000 {
+			return baseEpsilon * 7.0
 		} else if currentVertexCount > 20000 {
-			return baseEpsilon * 15.0 // 0.0015 degrees ≈ 165 meters
+			return baseEpsilon * 5.0
 		} else if currentVertexCount > 10000 {
-			return baseEpsilon * 10.0 // 0.001 degrees ≈ 110 meters
+			return baseEpsilon * 4.0
 		} else if currentVertexCount > 5000 {
-			return baseEpsilon * 5.0 // 0.0005 degrees ≈ 55 meters
+			return baseEpsilon * 3.0
 		} else if currentVertexCount > 2000 {
-			return baseEpsilon * 3.0 // 0.0003 degrees ≈ 33 meters
+			return baseEpsilon * 2.0
 		} else if currentVertexCount > 1000 {
-			return baseEpsilon * 2.0 // 0.0002 degrees ≈ 22 meters
+			return baseEpsilon * 1.5
 		}
 		return baseEpsilon
 	}
 
-	// Projected/planar coordinates: use larger epsilon
-	if currentVertexCount > 30000 {
+	// Projected/planar coordinates
+	if currentVertexCount > 50000 {
 		return 20.0
-	} else if currentVertexCount > 20000 {
+	} else if currentVertexCount > 30000 {
 		return 15.0
-	} else if currentVertexCount > 10000 {
+	} else if currentVertexCount > 20000 {
 		return 10.0
+	} else if currentVertexCount > 10000 {
+		return 7.0
 	} else if currentVertexCount > 5000 {
 		return 5.0
 	} else if currentVertexCount > 2000 {

@@ -3,8 +3,11 @@ package main
 import "math"
 
 // Polygon represents a no-fly zone as a list of vertices
+// For multi-ring polygons (with holes), the first ring is the outer boundary
+// and subsequent rings are holes (not yet implemented)
 type Polygon struct {
-	Vertices []Point `json:"vertices"`
+	Vertices []Point   `json:"vertices"`
+	Holes    [][]Point `json:"holes,omitempty"` // Inner rings (holes)
 }
 
 // Distance calculates Euclidean distance between two points
@@ -12,6 +15,26 @@ func (p Point) Distance(other Point) float64 {
 	dx := p.X - other.X
 	dy := p.Y - other.Y
 	return math.Sqrt(dx*dx + dy*dy)
+}
+
+// DistanceMeters calculates the distance in meters between two points in lat/lng coordinates
+// Uses the Haversine formula for accurate distance calculation
+func (p Point) DistanceMeters(other Point) float64 {
+	const earthRadiusMeters = 6371000.0 // Earth's radius in meters
+
+	// Convert degrees to radians
+	lat1 := p.Y * math.Pi / 180.0
+	lat2 := other.Y * math.Pi / 180.0
+	deltaLat := (other.Y - p.Y) * math.Pi / 180.0
+	deltaLon := (other.X - p.X) * math.Pi / 180.0
+
+	// Haversine formula
+	a := math.Sin(deltaLat/2)*math.Sin(deltaLat/2) +
+		math.Cos(lat1)*math.Cos(lat2)*
+			math.Sin(deltaLon/2)*math.Sin(deltaLon/2)
+	c := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
+
+	return earthRadiusMeters * c
 }
 
 // LineSegment represents a line segment between two points
