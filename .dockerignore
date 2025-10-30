@@ -1,0 +1,27 @@
+# Binaries
+*.exe
+motion-planner
+motion-planner-new.exe
+
+# Test files
+*.ps1
+test_*.md
+CLEANUP_SUMMARY.md
+PRM_IMPLEMENTATION.md
+
+# IDE files
+.vscode
+.idea
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Git
+.git
+.gitignore
+
+# Documentation (keep README.md)
+*.txt
