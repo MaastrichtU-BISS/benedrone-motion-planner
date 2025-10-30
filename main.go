@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
 	"sync"
@@ -21,38 +20,21 @@ type BoundingBox struct {
 }
 
 type RouteRequest struct {
-	Start Point `json:"start"`
-	End   Point `json:"end"`
-	// Optional: margin in map units to query around the route (default: 1000)
-	Margin float64 `json:"margin,omitempty"`
-	// Optional: expansion factor for bounding box (default: 1.0, no expansion)
-	ExpansionFactor float64 `json:"expansionFactor,omitempty"`
-	// Optional: custom bounding box (if provided, overrides margin and expansionFactor)
-	CustomBBox *BoundingBox `json:"customBBox,omitempty"`
-	// Optional: client-provided simplification epsilon (Douglas-Peucker)
-	// If provided and > 0, this epsilon will be used instead of automatic estimation.
-	SimplificationEpsilon *float64 `json:"simplificationEpsilon,omitempty"`
-}
-
-type CreateIndexRequest struct {
-	Polygons []Polygon `json:"polygons"`
-	Force    bool      `json:"force,omitempty"` // Set to true to force reload
+	Start      Point     `json:"start"`
+	End        Point     `json:"end"`
+	NoFlyZones []Polygon `json:"noFlyZones,omitempty"` // Optional: for checking start/end connections
 }
 
 type RouteResponse struct {
-	Path                []Point   `json:"path"`
-	Success             bool      `json:"success"`
-	Message             string    `json:"message,omitempty"`
-	PolygonsQueried     int       `json:"polygonsQueried,omitempty"`
-	SimplifiedPolygons  []Polygon `json:"simplifiedPolygons,omitempty"`
-	VerticesBeforeSimpl int       `json:"verticesBeforeSimplification,omitempty"`
-	VerticesAfterSimpl  int       `json:"verticesAfterSimplification,omitempty"`
-	DistanceMeters      float64   `json:"distanceMeters,omitempty"`
+	Path           []Point `json:"path"`
+	Success        bool    `json:"success"`
+	Message        string  `json:"message,omitempty"`
+	DistanceMeters float64 `json:"distanceMeters,omitempty"`
 }
 
 var (
-	globalIndex *SpatialIndex
-	indexMutex  sync.RWMutex
+	globalPRMGraph *PRMGraph
+	prmMutex       sync.RWMutex
 )
 
 // corsMiddleware adds CORS headers to allow frontend requests
@@ -89,128 +71,48 @@ func routeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("   Start: (%.2f, %.2f)\n", req.Start.X, req.Start.Y)
-	log.Printf("   End:   (%.2f, %.2f)\n", req.End.X, req.End.Y)
+	log.Printf("   Start: (%.6f, %.6f)\n", req.Start.X, req.Start.Y)
+	log.Printf("   End:   (%.6f, %.6f)\n", req.End.X, req.End.Y)
 
-	var noFlyZones []Polygon
+	// Check if PRM graph is available
+	prmMutex.RLock()
+	prmGraph := globalPRMGraph
+	prmMutex.RUnlock()
 
-	// Use spatial index to query relevant polygons
-	if globalIndex == nil {
-		log.Println("❌ Spatial index not initialized")
-		http.Error(w, "Spatial index not initialized. Call /createSpatialIndex first", http.StatusBadRequest)
-		return
-	}
-
-	var minX, minY, maxX, maxY float64
-
-	// Check if custom bounding box is provided
-	if req.CustomBBox != nil {
-		// Use custom bounding box from user (e.g., drawn rectangle in OpenLayers)
-		minX = req.CustomBBox.MinX
-		minY = req.CustomBBox.MinY
-		maxX = req.CustomBBox.MaxX
-		maxY = req.CustomBBox.MaxY
-		log.Printf("   Using custom bounding box\n")
-	} else {
-		// Calculate bounding box from start/end with margin and expansion factor
-		margin := req.Margin
-		if margin == 0 {
-			margin = 1000.0
-		}
-		log.Printf("   Margin: %.2f\n", margin)
-
-		expansionFactor := req.ExpansionFactor
-		if expansionFactor == 0 {
-			expansionFactor = 1.0 // No expansion by default
-		}
-		log.Printf("   Expansion factor: %.2fx\n", expansionFactor)
-
-		minX, minY, maxX, maxY = GetRouteBoundingBoxWithFactor(req.Start, req.End, margin, expansionFactor)
-	}
-
-	bboxWidth := maxX - minX
-	bboxHeight := maxY - minY
-	log.Printf("   Query bbox: (%.2f, %.2f) to (%.2f, %.2f) [%.2f x %.2f]\n",
-		minX, minY, maxX, maxY, bboxWidth, bboxHeight)
-
-	indexMutex.RLock()
-	noFlyZones = globalIndex.QueryRegion(minX, minY, maxX, maxY)
-	indexMutex.RUnlock()
-
-	log.Printf("   Polygons queried: %d\n", len(noFlyZones))
-
-	// Count vertices and simplify if needed
-	totalVertices := 0
-	for _, poly := range noFlyZones {
-		totalVertices += len(poly.Vertices)
-	}
-	log.Printf("   Total vertices: %d\n", totalVertices)
-
-	// Track simplification
-	verticesBeforeSimplification := 0
-	verticesAfterSimplification := 0
-	var simplifiedPolygons []Polygon
-
-	log.Printf("⚙️  Simplifying polygons...\n")
-
-	// Choose epsilon: prefer client-provided value if present, otherwise estimate
-	var epsilon float64
-	if req.SimplificationEpsilon != nil && *req.SimplificationEpsilon > 0 {
-		epsilon = *req.SimplificationEpsilon * 0.00002
-		log.Printf("   Using client-provided simplification epsilon: %.8f\n", epsilon)
-	}
-	// else {
-	// 	epsilon = EstimateSimplificationEpsilon(noFlyZones, totalVertices)
-	// 	log.Printf("   Using estimated simplification epsilon: %.8f\n", epsilon)
-	// }
-
-	if epsilon > 0 {
-		noFlyZones = SimplifyPolygons(noFlyZones, epsilon)
-		simplifiedPolygons = noFlyZones
-	}
-
-	// Count after simplification
-	simplifiedVertices := 0
-	for _, poly := range noFlyZones {
-		simplifiedVertices += len(poly.Vertices)
-	}
-	verticesBeforeSimplification = totalVertices
-	verticesAfterSimplification = simplifiedVertices
-
-	reductionPct := 0.0
-	if verticesBeforeSimplification > 0 {
-		reductionPct = 100.0 * float64(verticesBeforeSimplification-verticesAfterSimplification) / float64(verticesBeforeSimplification)
-	}
-	log.Printf("   Vertices: %d → %d (%.1f%% reduction)\n", verticesBeforeSimplification, verticesAfterSimplification, reductionPct)
-
-	totalVertices = simplifiedVertices
-
-	// Final check on vertex count
-	if totalVertices > 10000 {
-		errorMsg := fmt.Sprintf("Too many vertices (%d) even after simplification. Try reducing margin.", totalVertices)
-		log.Printf("❌ %s\n", errorMsg)
-		http.Error(w, errorMsg, http.StatusBadRequest)
+	if prmGraph == nil {
+		log.Println("❌ PRM graph not available")
+		http.Error(w, "PRM graph not built. Call /buildPRMGraph first", http.StatusBadRequest)
 		log.Println("========================================")
 		return
 	}
 
-	// Build visibility graph from no-fly zones
-	log.Println("🔗 Building visibility graph...")
-	graph := BuildVisibilityGraph(req.Start, req.End, noFlyZones)
-	log.Printf("   Graph nodes: %d\n", len(graph.Nodes))
+	// Create a temporary graph with start and end points connected
+	log.Println("🔗 Connecting start and end points to graph...")
+	tempGraph, startNodeID, endNodeID := prmGraph.CreateGraphWithStartEnd(req.Start, req.End, req.NoFlyZones)
 
-	edgeCount := 0
-	for _, edges := range graph.Edges {
-		edgeCount += len(edges)
+	if startNodeID == -1 || endNodeID == -1 {
+		log.Println("❌ Could not connect start or end point to graph")
+		response := RouteResponse{
+			Success: false,
+			Message: "Could not connect start or end point to the graph (possibly blocked by no-fly zones)",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
+		log.Println("========================================")
+		return
 	}
-	log.Printf("   Graph edges: %d\n", edgeCount/2) // Divided by 2 because edges are bidirectional
 
-	// Compute A* path on the visibility graph
-	// Start is always node 0, end is always node 1 (see BuildVisibilityGraph)
-	log.Println("🔍 Running A* pathfinding...")
-	path, success := AStarPathOnGraph(graph, 0, 1)
+	log.Printf("   ✅ Start connected as node %d\n", startNodeID)
+	log.Printf("   ✅ End connected as node %d\n", endNodeID)
 
-	// Calculate path distance in meters
+	// Convert to standard graph format
+	graph := tempGraph.ConvertToGraph()
+
+	// Run A* on the graph with start and end
+	log.Println("🔍 Running A* on PRM graph...")
+	path, success := AStarPathOnGraph(graph, startNodeID, endNodeID)
+
+	// Calculate distance
 	var distanceMeters float64
 	if success && len(path) > 1 {
 		for i := 0; i < len(path)-1; i++ {
@@ -219,24 +121,27 @@ func routeHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response := RouteResponse{
-		Path:                path,
-		Success:             success,
-		DistanceMeters:      distanceMeters,
-		PolygonsQueried:     len(noFlyZones),
-		SimplifiedPolygons:  simplifiedPolygons,
-		VerticesBeforeSimpl: verticesBeforeSimplification,
-		VerticesAfterSimpl:  verticesAfterSimplification,
+		Path:           path,
+		Success:        success,
+		DistanceMeters: distanceMeters,
 	}
 
 	if !success {
-		log.Println("❌ No path found")
-		response.Message = "No path found"
+		log.Println("❌ No path found on PRM graph")
+		response.Message = "No path found on PRM graph"
 	} else {
 		log.Printf("✅ Path found with %d waypoints\n", len(path))
-		log.Printf("   Distance: %.2f meters\n", distanceMeters)
-		log.Println("   Waypoints:")
-		for i, p := range path {
-			log.Printf("      %d: (%.6f, %.6f)\n", i, p.X, p.Y)
+		log.Printf("   Distance: %.2f meters (%.2f km)\n", distanceMeters, distanceMeters/1000)
+		log.Println("   Path preview (first/last 3 waypoints):")
+		for i := 0; i < len(path) && i < 3; i++ {
+			log.Printf("      %d: (%.6f, %.6f)\n", i, path[i].X, path[i].Y)
+		}
+		if len(path) > 6 {
+			log.Printf("      ... (%d intermediate waypoints)\n", len(path)-6)
+			startIdx := len(path) - 3
+			for i := startIdx; i < len(path); i++ {
+				log.Printf("      %d: (%.6f, %.6f)\n", i, path[i].X, path[i].Y)
+			}
 		}
 	}
 
@@ -245,10 +150,33 @@ func routeHandler(w http.ResponseWriter, r *http.Request) {
 	log.Println("========================================")
 }
 
-// POST /createSpatialIndex - Load polygons into spatial index (one-time setup)
-func createSpatialIndexHandler(w http.ResponseWriter, r *http.Request) {
+// GET /health - Health check endpoint
+func healthHandler(w http.ResponseWriter, r *http.Request) {
+	prmMutex.RLock()
+	hasPRMGraph := globalPRMGraph != nil
+	numNodes := 0
+	if globalPRMGraph != nil {
+		numNodes = len(globalPRMGraph.Nodes)
+	}
+	prmMutex.RUnlock()
+
+	status := "ready"
+	if !hasPRMGraph {
+		status = "waiting for PRM graph"
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":      status,
+		"hasPRMGraph": hasPRMGraph,
+		"numNodes":    numNodes,
+	})
+}
+
+// POST /buildPRMGraph - Build a probabilistic roadmap for the Netherlands
+func buildPRMGraphHandler(w http.ResponseWriter, r *http.Request) {
 	log.Println("========================================")
-	log.Println("📦 Create spatial index request received")
+	log.Println("🗺️  Build PRM Graph request received")
 
 	if r.Method != http.MethodPost {
 		log.Printf("❌ Method not allowed: %s\n", r.Method)
@@ -256,93 +184,157 @@ func createSpatialIndexHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if spatial index already exists
-	indexMutex.RLock()
-	alreadyExists := globalIndex != nil
-	indexMutex.RUnlock()
+	type BuildPRMRequest struct {
+		NumSamples       int       `json:"numSamples"`       // Number of random samples
+		ConnectionRadius float64   `json:"connectionRadius"` // Connection radius in degrees
+		SaveToFile       bool      `json:"saveToFile"`       // Whether to save to disk
+		Force            bool      `json:"force,omitempty"`  // Set to true to force rebuild
+		NoFlyZones       []Polygon `json:"noFlyZones"`       // No-fly zone polygons
+	}
 
-	var req CreateIndexRequest
+	var req BuildPRMRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		log.Printf("❌ Invalid request body: %v\n", err)
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
 
+	// Check if PRM graph already exists
+	prmMutex.RLock()
+	alreadyExists := globalPRMGraph != nil
+	prmMutex.RUnlock()
+
 	if alreadyExists && !req.Force {
-		log.Println("⚠️  Spatial index already exists")
-		log.Println("   To reload, set force:true in request or restart the server")
+		log.Println("⚠️  PRM graph already exists")
+		log.Println("   To rebuild, set force:true in request or restart the server")
 		log.Println("========================================")
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusConflict)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": false,
-			"error":   "Spatial index already exists",
-			"message": "Index is already initialized. Set 'force: true' to reload, or restart the server.",
+			"error":   "PRM graph already exists",
+			"message": "Graph is already built. Set 'force: true' to rebuild, or restart the server.",
 		})
 		return
 	}
 
 	if alreadyExists && req.Force {
-		log.Println("🔄 Force reload requested - recreating spatial index...")
+		log.Println("🔄 Force rebuild requested - recreating PRM graph...")
 	}
 
-	polygons := req.Polygons
-	log.Printf("   Received %d polygons\n", len(polygons))
-
-	// Count total vertices before merging
-	totalVertices := 0
-	for _, poly := range polygons {
-		totalVertices += len(poly.Vertices)
+	// Set defaults
+	if req.NumSamples == 0 {
+		req.NumSamples = 500 // Low precision default
 	}
-	log.Printf("   Total vertices: %d\n", totalVertices)
+	if req.ConnectionRadius == 0 {
+		req.ConnectionRadius = 0.1 // ~11 km
+	}
 
-	log.Println("🔨 Building spatial index...")
-	indexMutex.Lock()
-	globalIndex = NewSpatialIndex(polygons)
-	indexMutex.Unlock()
+	log.Printf("   Samples: %d\n", req.NumSamples)
+	log.Printf("   Connection radius: %.4f degrees\n", req.ConnectionRadius)
+	log.Printf("   No-fly zones: %d polygons\n", len(req.NoFlyZones))
 
-	log.Printf("✅ Spatial index created successfully\n")
+	// Build the graph
+	graph := BuildPRMGraph(req.NumSamples, req.ConnectionRadius, req.NoFlyZones)
+
+	// Save to global variable
+	prmMutex.Lock()
+	globalPRMGraph = graph
+	prmMutex.Unlock()
+
+	// Optionally save to file
+	if req.SaveToFile {
+		if err := SavePRMGraph(graph, "prm_graph.json"); err != nil {
+			log.Printf("⚠️  Failed to save graph: %v\n", err)
+		}
+	}
+
+	log.Printf("✅ PRM graph built and stored in memory\n")
 	log.Println("========================================")
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success":       true,
-		"indexed":       len(polygons),
-		"totalVertices": totalVertices,
+		"success":    true,
+		"numNodes":   len(graph.Nodes),
+		"numSamples": req.NumSamples,
+		"boundingBox": map[string]float64{
+			"minLat": graph.BoundingBox.MinLat,
+			"maxLat": graph.BoundingBox.MaxLat,
+			"minLon": graph.BoundingBox.MinLon,
+			"maxLon": graph.BoundingBox.MaxLon,
+		},
 	})
 }
 
-// GET /health - Health check endpoint
-func healthHandler(w http.ResponseWriter, r *http.Request) {
-	indexMutex.RLock()
-	isIndexed := globalIndex != nil
-	indexMutex.RUnlock()
+// GET /getPRMGraphLines - Get graph edges as line strings for visualization
+func getPRMGraphLinesHandler(w http.ResponseWriter, r *http.Request) {
+	log.Println("========================================")
+	log.Println("📊 Get PRM Graph Lines request received")
 
-	status := "ready"
-	if !isIndexed {
-		status = "waiting for spatial index"
+	if r.Method != http.MethodGet {
+		log.Printf("❌ Method not allowed: %s\n", r.Method)
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
 	}
+
+	prmMutex.RLock()
+	graph := globalPRMGraph
+	prmMutex.RUnlock()
+
+	if graph == nil {
+		log.Println("❌ PRM graph not built")
+		http.Error(w, "PRM graph not built. Call /buildPRMGraph first", http.StatusBadRequest)
+		log.Println("========================================")
+		return
+	}
+
+	lines := graph.GetGraphAsLineStrings()
+
+	log.Printf("   Returning %d line segments\n", len(lines))
+	log.Println("========================================")
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":  status,
-		"indexed": isIndexed,
+		"success":  true,
+		"lines":    lines,
+		"numNodes": len(graph.Nodes),
+		"numEdges": len(lines),
 	})
 }
 
 func main() {
+	// Try to load existing PRM graph from file on startup
+	log.Println("========================================")
+	log.Println("🚀 Drone Motion Planner Server (PRM-based)")
+	log.Println("========================================")
+	log.Println("Checking for existing PRM graph file...")
+
+	if graph, err := LoadPRMGraph("prm_graph.json"); err == nil {
+		prmMutex.Lock()
+		globalPRMGraph = graph
+		prmMutex.Unlock()
+		log.Printf("✅ Loaded existing PRM graph from file\n")
+		log.Printf("   Nodes: %d\n", len(graph.Nodes))
+		log.Printf("   Bounding box: (%.2f, %.2f) to (%.2f, %.2f)\n",
+			graph.BoundingBox.MinLon, graph.BoundingBox.MinLat,
+			graph.BoundingBox.MaxLon, graph.BoundingBox.MaxLat)
+	} else {
+		log.Println("ℹ️  No existing graph found (this is normal on first run)")
+		log.Println("   Call /buildPRMGraph to create a new graph")
+	}
+	log.Println("")
+
 	http.HandleFunc("/route", corsMiddleware(routeHandler))
-	http.HandleFunc("/createSpatialIndex", corsMiddleware(createSpatialIndexHandler))
+	http.HandleFunc("/buildPRMGraph", corsMiddleware(buildPRMGraphHandler))
+	http.HandleFunc("/getPRMGraphLines", corsMiddleware(getPRMGraphLinesHandler))
 	http.HandleFunc("/health", corsMiddleware(healthHandler))
 
-	log.Println("========================================")
-	log.Println("🚀 Drone Motion Planner Server")
-	log.Println("========================================")
 	log.Println("Server starting on :8080")
 	log.Println("")
 	log.Println("Endpoints:")
-	log.Println("  POST /createSpatialIndex - Load all no-fly zones once (call this first)")
+	log.Println("  POST /buildPRMGraph      - Build probabilistic roadmap (PRM)")
+	log.Println("  GET  /getPRMGraphLines   - Get PRM graph edges for visualization")
 	log.Println("  POST /route              - Compute route with start and end points")
 	log.Println("  GET  /health             - Check server status")
 	log.Println("")
