@@ -3,11 +3,8 @@ package main
 import "math"
 
 // Polygon represents a no-fly zone as a list of vertices
-// For multi-ring polygons (with holes), the first ring is the outer boundary
-// and subsequent rings are holes (not yet implemented)
 type Polygon struct {
-	Vertices []Point   `json:"vertices"`
-	Holes    [][]Point `json:"holes,omitempty"` // Inner rings (holes)
+	Vertices []Point `json:"vertices"`
 }
 
 // Distance calculates Euclidean distance between two points
@@ -138,78 +135,17 @@ func DoesSegmentIntersectPolygon(seg LineSegment, polygon Polygon) bool {
 	return false
 }
 
-// IsPointOnPolygonBoundary checks if a point lies on any edge of a polygon
-func IsPointOnPolygonBoundary(point Point, polygon Polygon) bool {
-	n := len(polygon.Vertices)
-	const epsilon = 1e-9 // Small tolerance for floating point comparison
-
-	for i := 0; i < n; i++ {
-		v1 := polygon.Vertices[i]
-		v2 := polygon.Vertices[(i+1)%n]
-
-		// Check if point is on the line segment from v1 to v2
-		// Using cross product to check collinearity and distance check
-		crossProduct := (point.Y-v1.Y)*(v2.X-v1.X) - (point.X-v1.X)*(v2.Y-v1.Y)
-		if math.Abs(crossProduct) < epsilon {
-			// Point is collinear, now check if it's between v1 and v2
-			dotProduct := (point.X-v1.X)*(v2.X-v1.X) + (point.Y-v1.Y)*(v2.Y-v1.Y)
-			squaredLength := (v2.X-v1.X)*(v2.X-v1.X) + (v2.Y-v1.Y)*(v2.Y-v1.Y)
-			if dotProduct >= -epsilon && dotProduct <= squaredLength+epsilon {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// IsSegmentOnPolygonBoundary checks if a segment is exactly a polygon edge
-// Only allows segments that match actual polygon edges (vertex to adjacent vertex)
-func IsSegmentOnPolygonBoundary(seg LineSegment, polygon Polygon) bool {
-	n := len(polygon.Vertices)
-
-	// Check if this segment matches a polygon edge (in either direction)
-	for i := 0; i < n; i++ {
-		v1 := polygon.Vertices[i]
-		v2 := polygon.Vertices[(i+1)%n]
-
-		// Check if seg matches this polygon edge exactly (in either direction)
-		if (seg.P1 == v1 && seg.P2 == v2) || (seg.P1 == v2 && seg.P2 == v1) {
-			return true
-		}
-	}
-	return false
-}
-
-// isPointOnSegment checks if point p lies on line segment seg
-func isPointOnSegment(p Point, seg LineSegment) bool {
-	const epsilon = 1e-9
-	crossProduct := (p.Y-seg.P1.Y)*(seg.P2.X-seg.P1.X) - (p.X-seg.P1.X)*(seg.P2.Y-seg.P1.Y)
-	if math.Abs(crossProduct) > epsilon {
-		return false
-	}
-
-	dotProduct := (p.X-seg.P1.X)*(seg.P2.X-seg.P1.X) + (p.Y-seg.P1.Y)*(seg.P2.Y-seg.P1.Y)
-	squaredLength := (seg.P2.X-seg.P1.X)*(seg.P2.X-seg.P1.X) + (seg.P2.Y-seg.P1.Y)*(seg.P2.Y-seg.P1.Y)
-	return dotProduct >= -epsilon && dotProduct <= squaredLength+epsilon
-}
-
 // IsPathClear checks if a straight line path between two points is collision-free
-// Allows paths that lie on polygon boundaries (drone flying along no-fly zone edge)
 func IsPathClear(p1, p2 Point, noFlyZones []Polygon) bool {
 	segment := LineSegment{P1: p1, P2: p2}
 
 	for _, zone := range noFlyZones {
-		// Allow if this segment is on the polygon boundary (flying along the edge)
-		if IsSegmentOnPolygonBoundary(segment, zone) {
-			continue
-		}
-
 		// Check if the segment intersects the polygon boundary
 		if DoesSegmentIntersectPolygon(segment, zone) {
 			return false
 		}
 
-		// Check if either endpoint is inside the polygon (not on boundary)
+		// Check if either endpoint is inside the polygon
 		if IsPointInPolygon(p1, zone) || IsPointInPolygon(p2, zone) {
 			return false
 		}
