@@ -74,6 +74,32 @@ func routeHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("   Start: (%.6f, %.6f)\n", req.Start.X, req.Start.Y)
 	log.Printf("   End:   (%.6f, %.6f)\n", req.End.X, req.End.Y)
 
+	// First, check if a straight line path is possible (no obstacles)
+	log.Println("🔍 Checking if straight line path is possible...")
+	straightLineClear := IsPathClear(req.Start, req.End, req.NoFlyZones)
+
+	if straightLineClear {
+		log.Println("✅ Straight line path is clear!")
+		distance := req.Start.DistanceMeters(req.End)
+
+		response := RouteResponse{
+			Path:           []Point{req.Start, req.End},
+			Success:        true,
+			Message:        "Direct straight line path (no obstacles)",
+			DistanceMeters: distance,
+		}
+
+		log.Printf("   Distance: %.2f meters (%.2f km)\n", distance, distance/1000)
+		log.Println("   Path: straight line (2 waypoints)")
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
+		log.Println("========================================")
+		return
+	}
+
+	log.Println("⚠️  Straight line blocked - using PRM graph pathfinding...")
+
 	// Check if PRM graph is available
 	prmMutex.RLock()
 	prmGraph := globalPRMGraph
