@@ -8,6 +8,8 @@ services:
     volumes:
       # Mount volume to persist graph data
       - graph-data:/root
+      # Mount nfz-polygons directory (read-only)
+      - ./nfz-polygons:/app/nfz-polygons:ro
     environment:
       # Add any environment variables here if needed
       - TZ=Europe/Amsterdam

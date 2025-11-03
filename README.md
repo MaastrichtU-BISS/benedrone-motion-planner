@@ -25,68 +25,7 @@ go run .
 
 Server starts on `http://localhost:8080`
 
-### Build a Graph
-
-```bash
-curl -X POST http://localhost:8080/buildPRMGraph \
-  -H "Content-Type: application/json" \
-  -d '{
-    "numSamples": 5000,
-    "connectionRadius": 0.10,
-    "saveToFile": true,
-    "noFlyZones": []
-  }'
-```
-
-### Request a Route
-
-```bash
-curl -X POST http://localhost:8080/route \
-  -H "Content-Type: application/json" \
-  -d '{
-    "start": {"x": 4.9, "y": 52.4},
-    "end": {"x": 5.7, "y": 50.9}
-  }'
-```
-
-## 📡 API Endpoints
-
-### `POST /buildPRMGraph`
-Build or rebuild the navigation graph.
-
-**Request:**
-```json
-{
-  "numSamples": 5000,           // Number of random sample points
-  "connectionRadius": 0.10,     // Max connection distance in degrees (~11 km)
-  "saveToFile": true,           // Save to prm_graph.json
-  "force": false,               // Force rebuild if graph exists
-  "noFlyZones": [               // Optional: restricted areas
-    {
-      "vertices": [
-        {"x": 5.0, "y": 52.0},
-        {"x": 5.1, "y": 52.0},
-        {"x": 5.1, "y": 52.1},
-        {"x": 5.0, "y": 52.1}
-      ]
-    }
-  ]
-}
-```
-
-**Response:**
-```json
-{
-  "success": true,
-  "numNodes": 5000,
-  "boundingBox": {
-    "minLat": 50.75,
-    "maxLat": 53.55,
-    "minLon": 3.36,
-    "maxLon": 7.23
-  }
-}
-```
+## API Endpoints
 
 ### `POST /route`
 Calculate a route between two points.
@@ -96,7 +35,6 @@ Calculate a route between two points.
 {
   "start": {"x": 4.9, "y": 52.4},     // Longitude, Latitude
   "end": {"x": 5.7, "y": 50.9},
-  "noFlyZones": []                     // Optional
 }
 ```
 
