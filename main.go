@@ -20,9 +20,8 @@ type BoundingBox struct {
 }
 
 type RouteRequest struct {
-	Start      Point     `json:"start"`
-	End        Point     `json:"end"`
-	NoFlyZones []Polygon `json:"noFlyZones,omitempty"` // Optional: for checking start/end connections
+	Start Point `json:"start"`
+	End   Point `json:"end"`
 }
 
 type RouteResponse struct {
@@ -33,9 +32,50 @@ type RouteResponse struct {
 }
 
 var (
-	globalPRMGraph *PRMGraph
-	prmMutex       sync.RWMutex
+	globalPRMGraph   *PRMGraph
+	globalNoFlyZones []Polygon
+	prmMutex         sync.RWMutex
 )
+
+// buildPRMGraphIfNeeded builds the PRM graph if it doesn't exist
+func buildPRMGraphIfNeeded() error {
+	prmMutex.RLock()
+	exists := globalPRMGraph != nil
+	prmMutex.RUnlock()
+
+	if exists {
+		log.Println("✅ PRM graph already exists, skipping build")
+		return nil
+	}
+
+	log.Println("🗺️  Building PRM graph...")
+
+	// Default parameters for graph building
+	numSamples := 13000
+	connectionRadius := 0.11 // ~11 km
+
+	log.Printf("   Samples: %d\n", numSamples)
+	log.Printf("   Connection radius: %.4f degrees\n", connectionRadius)
+	log.Printf("   No-fly zones: %d polygons\n", len(globalNoFlyZones))
+
+	// Build the graph
+	graph := BuildPRMGraph(numSamples, connectionRadius, globalNoFlyZones)
+
+	// Save to global variable
+	prmMutex.Lock()
+	globalPRMGraph = graph
+	prmMutex.Unlock()
+
+	// Save to file
+	if err := SavePRMGraph(graph, "prm_graph.json"); err != nil {
+		log.Printf("⚠️  Failed to save graph: %v\n", err)
+	} else {
+		log.Println("✅ PRM graph saved to prm_graph.json")
+	}
+
+	log.Printf("✅ PRM graph built with %d nodes\n", len(graph.Nodes))
+	return nil
+}
 
 // corsMiddleware adds CORS headers to allow frontend requests
 func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
@@ -76,7 +116,7 @@ func routeHandler(w http.ResponseWriter, r *http.Request) {
 
 	// First, check if a straight line path is possible (no obstacles)
 	log.Println("🔍 Checking if straight line path is possible...")
-	straightLineClear := IsPathClear(req.Start, req.End, req.NoFlyZones)
+	straightLineClear := IsPathClear(req.Start, req.End, globalNoFlyZones)
 
 	if straightLineClear {
 		log.Println("✅ Straight line path is clear!")
@@ -114,7 +154,7 @@ func routeHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Create a temporary graph with start and end points connected
 	log.Println("🔗 Connecting start and end points to graph...")
-	tempGraph, startNodeID, endNodeID := prmGraph.CreateGraphWithStartEnd(req.Start, req.End, req.NoFlyZones)
+	tempGraph, startNodeID, endNodeID := prmGraph.CreateGraphWithStartEnd(req.Start, req.End, globalNoFlyZones)
 
 	if startNodeID == -1 || endNodeID == -1 {
 		log.Println("❌ Could not connect start or end point to graph")
@@ -199,100 +239,6 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// POST /buildPRMGraph - Build a probabilistic roadmap for the Netherlands
-func buildPRMGraphHandler(w http.ResponseWriter, r *http.Request) {
-	log.Println("========================================")
-	log.Println("🗺️  Build PRM Graph request received")
-
-	if r.Method != http.MethodPost {
-		log.Printf("❌ Method not allowed: %s\n", r.Method)
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	type BuildPRMRequest struct {
-		NumSamples       int       `json:"numSamples"`       // Number of random samples
-		ConnectionRadius float64   `json:"connectionRadius"` // Connection radius in degrees
-		SaveToFile       bool      `json:"saveToFile"`       // Whether to save to disk
-		Force            bool      `json:"force,omitempty"`  // Set to true to force rebuild
-		NoFlyZones       []Polygon `json:"noFlyZones"`       // No-fly zone polygons
-	}
-
-	var req BuildPRMRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		log.Printf("❌ Invalid request body: %v\n", err)
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
-		return
-	}
-
-	// Check if PRM graph already exists
-	prmMutex.RLock()
-	alreadyExists := globalPRMGraph != nil
-	prmMutex.RUnlock()
-
-	if alreadyExists && !req.Force {
-		log.Println("⚠️  PRM graph already exists")
-		log.Println("   To rebuild, set force:true in request or restart the server")
-		log.Println("========================================")
-
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusConflict)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": false,
-			"error":   "PRM graph already exists",
-			"message": "Graph is already built. Set 'force: true' to rebuild, or restart the server.",
-		})
-		return
-	}
-
-	if alreadyExists && req.Force {
-		log.Println("🔄 Force rebuild requested - recreating PRM graph...")
-	}
-
-	// Set defaults
-	if req.NumSamples == 0 {
-		req.NumSamples = 500 // Low precision default
-	}
-	if req.ConnectionRadius == 0 {
-		req.ConnectionRadius = 0.1 // ~11 km
-	}
-
-	log.Printf("   Samples: %d\n", req.NumSamples)
-	log.Printf("   Connection radius: %.4f degrees\n", req.ConnectionRadius)
-	log.Printf("   No-fly zones: %d polygons\n", len(req.NoFlyZones))
-
-	// Build the graph
-	graph := BuildPRMGraph(req.NumSamples, req.ConnectionRadius, req.NoFlyZones)
-
-	// Save to global variable
-	prmMutex.Lock()
-	globalPRMGraph = graph
-	prmMutex.Unlock()
-
-	// Optionally save to file
-	if req.SaveToFile {
-		if err := SavePRMGraph(graph, "prm_graph.json"); err != nil {
-			log.Printf("⚠️  Failed to save graph: %v\n", err)
-		}
-	}
-
-	log.Printf("✅ PRM graph built and stored in memory\n")
-	log.Println("========================================")
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success":    true,
-		"numNodes":   len(graph.Nodes),
-		"numSamples": req.NumSamples,
-		"boundingBox": map[string]float64{
-			"minLat": graph.BoundingBox.MinLat,
-			"maxLat": graph.BoundingBox.MaxLat,
-			"minLon": graph.BoundingBox.MinLon,
-			"maxLon": graph.BoundingBox.MaxLon,
-		},
-	})
-}
-
 // GET /getPRMGraphLines - Get graph edges as line strings for visualization
 func getPRMGraphLinesHandler(w http.ResponseWriter, r *http.Request) {
 	log.Println("========================================")
@@ -330,12 +276,25 @@ func getPRMGraphLinesHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	// Try to load existing PRM graph from file on startup
 	log.Println("========================================")
 	log.Println("🚀 Drone Motion Planner Server (PRM-based)")
 	log.Println("========================================")
-	log.Println("Checking for existing PRM graph file...")
 
+	// Load no-fly zones from files
+	log.Println("Loading no-fly zones from files...")
+	noFlyZones, err := loadNoFlyZonesFromFiles()
+	if err != nil {
+		log.Printf("⚠️  Failed to load no-fly zones: %v\n", err)
+		log.Println("   Continuing without no-fly zones...")
+		globalNoFlyZones = []Polygon{}
+	} else {
+		globalNoFlyZones = noFlyZones
+		log.Printf("✅ Loaded %d no-fly zone polygons\n", len(globalNoFlyZones))
+	}
+	log.Println("")
+
+	// Try to load existing PRM graph from file
+	log.Println("Checking for existing PRM graph file...")
 	if graph, err := LoadPRMGraph("prm_graph.json"); err == nil {
 		prmMutex.Lock()
 		globalPRMGraph = graph
@@ -346,20 +305,21 @@ func main() {
 			graph.BoundingBox.MinLon, graph.BoundingBox.MinLat,
 			graph.BoundingBox.MaxLon, graph.BoundingBox.MaxLat)
 	} else {
-		log.Println("ℹ️  No existing graph found (this is normal on first run)")
-		log.Println("   Call /buildPRMGraph to create a new graph")
+		log.Println("ℹ️  No existing graph found, building new graph...")
+		if err := buildPRMGraphIfNeeded(); err != nil {
+			log.Printf("❌ Failed to build PRM graph: %v\n", err)
+			log.Println("   Server will start but routing will not be available")
+		}
 	}
 	log.Println("")
 
 	http.HandleFunc("/route", corsMiddleware(routeHandler))
-	http.HandleFunc("/buildPRMGraph", corsMiddleware(buildPRMGraphHandler))
 	http.HandleFunc("/getPRMGraphLines", corsMiddleware(getPRMGraphLinesHandler))
 	http.HandleFunc("/health", corsMiddleware(healthHandler))
 
 	log.Println("Server starting on :8080")
 	log.Println("")
 	log.Println("Endpoints:")
-	log.Println("  POST /buildPRMGraph      - Build probabilistic roadmap (PRM)")
 	log.Println("  GET  /getPRMGraphLines   - Get PRM graph edges for visualization")
 	log.Println("  POST /route              - Compute route with start and end points")
 	log.Println("  GET  /health             - Check server status")
