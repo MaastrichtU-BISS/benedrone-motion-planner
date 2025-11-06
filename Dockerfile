@@ -22,7 +22,7 @@ FROM alpine:latest
 # Install ca-certificates and wget for health checks
 RUN apk --no-cache add ca-certificates wget
 
-WORKDIR /root/
+WORKDIR /app/
 
 # Copy the binary from builder
 COPY --from=builder /app/motion-planner .

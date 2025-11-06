@@ -2,12 +2,12 @@ services:
   motion-planner:
     build: .
     container_name: benedrone-motion-planner
-    ports:
-      - "8080:8080"
+    # ports:
+    #   - "8080:8080"
     restart: unless-stopped
     volumes:
       # Mount volume to persist graph data
-      - graph-data:/root
+      # - graph-data:/root
       # Mount nfz-polygons directory (read-only)
       - ./nfz-polygons:/app/nfz-polygons:ro
     environment:
@@ -19,6 +19,16 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
+    networks:
+      - default
+      # - proxy
+
+networks:
+  default:
+    driver: bridge
+  # proxy:
+  #   name: reverse_proxy
+  #   external: true
 
 volumes:
   graph-data:
