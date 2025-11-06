@@ -21,14 +21,14 @@ services:
       start_period: 40s
     networks:
       - default
-      # - proxy
+      - proxy
 
 networks:
   default:
     driver: bridge
-  # proxy:
-  #   name: reverse_proxy
-  #   external: true
+  proxy:
+    name: reverse_proxy
+    external: true
 
 volumes:
   graph-data:
