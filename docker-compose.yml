@@ -10,6 +10,7 @@ services:
       # - graph-data:/root
       # Mount nfz-polygons directory (read-only)
       - ./nfz-polygons:/app/nfz-polygons:ro
+      - ./prm_graph.json:/app/prm_graph.json:ro
     environment:
       # Add any environment variables here if needed
       - TZ=Europe/Amsterdam
